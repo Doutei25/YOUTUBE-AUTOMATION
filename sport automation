@@ -1,0 +1,135 @@
+{
+  "name": "World Cup Daily Recap - Auto Video Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "days", "daysInterval": 1, "triggerAtHour": 10 }
+          ]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Daily",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1200, 0]
+    },
+    {
+      "parameters": {},
+      "id": "node-manual",
+      "name": "Manual Test",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-1200, 200]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "a1", "name": "gemini_api_key", "type": "string", "value": "PASTE_YOUR_GEMINI_API_KEY_HERE" },
+            { "id": "a2", "name": "github_owner", "type": "string", "value": "PASTE_YOUR_GITHUB_USERNAME" },
+            { "id": "a3", "name": "github_repo", "type": "string", "value": "PASTE_YOUR_REPO_NAME" },
+            { "id": "a4", "name": "github_pat", "type": "string", "value": "PASTE_A_GITHUB_PERSONAL_ACCESS_TOKEN_WITH_repo_SCOPE" },
+            { "id": "a5", "name": "video_privacy_status", "type": "string", "value": "private" },
+            { "id": "a6", "name": "football_data_token", "type": "string", "value": "PASTE_YOUR_FREE_FOOTBALL_DATA_ORG_TOKEN_HERE" }
+          ]
+        }
+      },
+      "id": "node-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-980, 100],
+      "notes": "Replace these 4 values before activating. See README for how to get each one."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.football-data.org/v4/competitions/WC/matches?dateFrom={{ $now.minus({days:1}).format('yyyy-LL-dd') }}&dateTo={{ $now.format('yyyy-LL-dd') }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Auth-Token", "value": "={{ $('Config').item.json.football_data_token }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-fixtures",
+      "name": "Get World Cup Results",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-760, 100],
+      "notes": "Free football-data.org tier: World Cup included, 10 req/min, no card. Get a token at football-data.org/client/register"
+    },
+    {
+      "parameters": {
+        "jsCode": "const matches = ($input.first().json.matches || []).filter(m => m.status === 'FINISHED');\nif (matches.length === 0) {\n  throw new Error('No finished World Cup matches in the last 24h - nothing to recap today.');\n}\nconst summary = matches.map(m => ({\n  home: m.homeTeam.name,\n  away: m.awayTeam.name,\n  homeScore: m.score.fullTime.home,\n  awayScore: m.score.fullTime.away,\n  stage: m.stage,\n}));\nreturn [{ json: { matches: summary, match_count: summary.length } }];"
+      },
+      "id": "node-pick-event",
+      "name": "Build Match Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-540, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={{ $('Config').item.json.gemini_api_key }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  contents: [{\n    parts: [{\n      text: `You write scripts for a faceless YouTube World Cup recap channel. Turn today's real results into an engaging daily recap.\\n\\nToday's finished matches (factual, JSON): ${JSON.stringify($json.matches)}\\n\\nReturn ONLY raw JSON (no markdown fences, no commentary) matching exactly this schema:\\n{\\n  \\\"title\\\": \\\"a punchy, accurate, curiosity-driven YouTube title under 70 characters mentioning at least one real scoreline or team\\\",\\n  \\\"description\\\": \\\"a 2-3 sentence YouTube description listing today's results, ending with 5 relevant hashtags\\\",\\n  \\\"tags\\\": [\\\"8 to 15 relevant search tags, include team names and 'world cup 2026'\\\"],\\n  \\\"scenes\\\": [\\n    {\\n      \\\"narration\\\": \\\"40-90 words of energetic, factual sports-recap narration for this scene, written to be read aloud\\\",\\n      \\\"image_prompt\\\": \\\"a generic, stylized illustration for this scene: stadium atmosphere, crowd, confetti, floodlights, generic colored jerseys (no real team crests or logos), silhouette or generic-looking players (no real identifiable faces), no scoreboard text, no on-screen text\\\"\\n    }\\n  ]\\n}\\nWrite one intro scene, then exactly one scene per match in the data covering its real final score, then one closing scene teasing what's next in the tournament. Use only the real scores and team names given - never invent results. Never describe a specific real player by name or likeness in image_prompt, and never reference real team crests, kit sponsor logos, or broadcast graphics in image_prompt - keep all visuals generic.`\n    }]\n  }],\n  generationConfig: { temperature: 0.9, responseMimeType: \"application/json\" }\n}) }}",
+        "options": {}
+      },
+      "id": "node-gemini",
+      "name": "Generate Script (Gemini)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-320, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.candidates[0].content.parts[0].text;\nconst cleaned = raw.replace(/```json|```/g, '').trim();\nlet data;\ntry {\n  data = JSON.parse(cleaned);\n} catch (e) {\n  throw new Error('Gemini did not return valid JSON: ' + cleaned.slice(0, 300));\n}\nif (!data.scenes || !data.scenes.length) {\n  throw new Error('Gemini response missing scenes array');\n}\nreturn [{ json: data }];"
+      },
+      "id": "node-parse",
+      "name": "Parse Script JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-100, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.github.com/repos/{{ $('Config').item.json.github_owner }}/{{ $('Config').item.json.github_repo }}/dispatches",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $('Config').item.json.github_pat }}" },
+            { "name": "Accept", "value": "application/vnd.github+json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_type: \"render_video\", client_payload: { title: $json.title, description: $json.description, tags: $json.tags, privacy_status: $('Config').item.json.video_privacy_status, scenes: $json.scenes } }) }}",
+        "options": {}
+      },
+      "id": "node-dispatch",
+      "name": "Trigger GitHub Render",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [120, 100]
+    }
+  ],
+  "connections": {
+    "Daily": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Manual Test": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Config": { "main": [[{ "node": "Get World Cup Results", "type": "main", "index": 0 }]] },
+    "Get World Cup Results": { "main": [[{ "node": "Build Match Summary", "type": "main", "index": 0 }]] },
+    "Build Match Summary": { "main": [[{ "node": "Generate Script (Gemini)", "type": "main", "index": 0 }]] },
+    "Generate Script (Gemini)": { "main": [[{ "node": "Parse Script JSON", "type": "main", "index": 0 }]] },
+    "Parse Script JSON": { "main": [[{ "node": "Trigger GitHub Render", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}
